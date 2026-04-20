@@ -989,13 +989,36 @@ def build_macro_context(prices):
         fg=safe_float(d["value"]); fg_label=d["value_classification"]
     except: pass
 
+    # ── Delta disoccupazione — segnale cruciale per stagflazione ─────────────
+    # Se la disoccupazione sale mese su mese → crescita in deterioramento
+    unemp_series = fred["unemployment"].dropna()
+    unemp_delta = np.nan
+    if len(unemp_series) >= 3:
+        unemp_recent = safe_float(unemp_series.iloc[-1])
+        unemp_3m_ago = safe_float(unemp_series.iloc[-3])
+        if not pd.isna(unemp_recent) and not pd.isna(unemp_3m_ago):
+            unemp_delta = unemp_recent - unemp_3m_ago  # positivo = disoccupazione sale = male
+
     # Macro block scores
     gs=is_=ss=ls=0.0
     if not pd.isna(spx_3m): gs += np.clip(spx_3m/4,-2.5,2.5)
     if not pd.isna(yield_spread): gs += np.clip(yield_spread/0.75,-2,2)
     if not pd.isna(ind_yoy): gs += np.clip(ind_yoy/3,-2,2)
     if not pd.isna(ret_yoy): gs += np.clip(ret_yoy/3,-2,2)
-    if not pd.isna(unemployment): gs += np.clip((4.5-unemployment)/0.7,-2,2)
+
+    # Disoccupazione — soglia abbassata a 4.0% (mercato del lavoro USA attuale)
+    # Sopra 4.0% = segnale negativo per crescita
+    if not pd.isna(unemployment):
+        gs += np.clip((4.0-unemployment)/0.5,-2.5,1.5)
+
+    # Delta disoccupazione — se sale è segnale forte di crescita in calo
+    # Aprile 2026: disoccupazione sale → penalità crescita, bonus stagflazione
+    if not pd.isna(unemp_delta):
+        if unemp_delta > 0.2:   # sale significativamente
+            gs -= np.clip(unemp_delta/0.2, 0, 2.5)
+        elif unemp_delta < -0.2:  # scende → economia forte
+            gs += np.clip(abs(unemp_delta)/0.3, 0, 1.5)
+
     if not pd.isna(growth_delta): gs += np.clip(growth_delta/0.5,-1.5,1.5)
 
     if not pd.isna(cpi_yoy): is_ += np.clip((cpi_yoy-2)/1.0,-2.5,2.5)
@@ -1149,6 +1172,20 @@ def build_macro_context(prices):
             score_deflation   += norm(unemp_vs_norm, 1.2, 0, 1.2)
             score_goldilocks  -= norm(unemp_vs_norm, 1.5, 0, 1.0)
             score_overheating -= norm(unemp_vs_norm, 2.0, 0, 1.0)
+
+    # ── DELTA DISOCCUPAZIONE — segnale direzionale chiave ────────────────────
+    # Disoccupazione che SALE = crescita in deterioramento = Stagflazione/Deflazione
+    # Disoccupazione che SCENDE = economia forte = Surriscaldamento/Goldilocks
+    if not pd.isna(unemp_delta):
+        if unemp_delta > 0.1:   # sale → pessimo per crescita
+            score_stagflation += norm(unemp_delta, 0.15, 0, 2.5)
+            score_deflation   += norm(unemp_delta, 0.20, 0, 1.5)
+            score_overheating -= norm(unemp_delta, 0.20, 0, 2.0)
+            score_goldilocks  -= norm(unemp_delta, 0.25, 0, 1.5)
+        elif unemp_delta < -0.1:  # scende → positivo per crescita
+            score_overheating += norm(abs(unemp_delta), 0.20, 0, 1.5)
+            score_goldilocks  += norm(abs(unemp_delta), 0.25, 0, 1.0)
+            score_stagflation -= norm(abs(unemp_delta), 0.25, 0, 1.5)
 
     quadrant_scores = {
         "Goldilocks / Reflazione": round(score_goldilocks, 2),
