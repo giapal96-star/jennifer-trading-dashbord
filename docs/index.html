@@ -11,27 +11,48 @@
 body{background:#080808;color:#e0e0e0;font-family:system-ui,sans-serif;
      min-height:100vh;display:flex;flex-direction:column;align-items:center;
      justify-content:center;padding:24px;text-align:center}
-.logo{font-size:48px;margin-bottom:16px}
-h1{font-size:22px;font-weight:300;color:#fff;margin-bottom:6px}
-.sub{font-size:13px;color:#444;margin-bottom:40px;font-family:monospace}
-.btn{display:inline-flex;align-items:center;gap:10px;background:#111;
-     border:1px solid #1e1e1e;color:#ccc;padding:14px 24px;border-radius:12px;
-     text-decoration:none;font-size:14px;margin:6px;transition:all .2s}
-.btn:hover{border-color:#2a2a2a;color:#fff}
+.logo{font-size:56px;margin-bottom:20px}
+h1{font-size:24px;font-weight:300;color:#fff;margin-bottom:6px;letter-spacing:-.02em}
+.sub{font-size:12px;color:#333;margin-bottom:48px;font-family:monospace}
+.btn{display:flex;align-items:center;gap:12px;background:#111;
+     border:1px solid #1e1e1e;color:#ccc;padding:16px 28px;border-radius:14px;
+     text-decoration:none;font-size:15px;margin:8px;transition:all .2s;width:280px}
+.btn:hover{border-color:#333;color:#fff;background:#161616}
 .btn.primary{background:#0d3320;border-color:#4ade8033;color:#4ade80}
 .btn.primary:hover{background:#0d4020}
-.install{margin-top:40px;font-size:12px;color:#2a2a2a;max-width:300px;line-height:1.7}
+.btn .icon{font-size:22px}
+.btn .text{text-align:left}
+.btn .title{font-weight:500;display:block}
+.btn .desc{font-size:11px;opacity:.5;display:block;margin-top:2px}
+.install{margin-top:48px;font-size:11px;color:#222;max-width:280px;line-height:1.8}
 </style>
 </head>
 <body>
 <div class='logo'>📊</div>
 <h1>Jennifer Trading System</h1>
-<div class='sub'>Layer 1 · Layer 2 · Analisi strutturale</div>
-<a class='btn primary' href='dashboard.html'>🔍 Screening L1</a>
-<a class='btn' href='jennifer_setups.html'>🎯 Setup operativi L2</a>
+<div class='sub'>Analisi strutturale · Macro Dalio · Setup operativi</div>
+
+<a class='btn primary' href='dashboard.html'>
+  <span class='icon'>🔍</span>
+  <span class='text'>
+    <span class='title'>Layer 1 — Screening</span>
+    <span class='desc'>Macro · Ranking asset · Correlazioni</span>
+  </span>
+</a>
+
+<a class='btn' href='jennifer_setups.html'>
+  <span class='icon'>🎯</span>
+  <span class='text'>
+    <span class='title'>Layer 2 — Setup operativi</span>
+    <span class='desc'>Entry · Stop · Target strutturale</span>
+  </span>
+</a>
+
 <div class='install'>
-  Per installare come app: menu del browser → "Aggiungi a schermata Home"
+  Per installare come app sul telefono:<br>
+  menu browser → "Aggiungi a schermata Home"
 </div>
+
 <script>
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
