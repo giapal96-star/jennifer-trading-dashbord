@@ -1,0 +1,36 @@
+{
+  "name": "Jennifer Trading System",
+  "short_name": "Jennifer",
+  "description": "Sistema di analisi e screening asset — Layer 1 + Layer 2",
+  "start_url": "/jennifer-trading/",
+  "display": "standalone",
+  "background_color": "#080808",
+  "theme_color": "#080808",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Screening L1",
+      "url": "/jennifer-trading/index.html",
+      "description": "Apri il Layer 1 — Screening asset"
+    },
+    {
+      "name": "Setup operativi",
+      "url": "/jennifer-trading/jennifer_setups.html",
+      "description": "Apri il Layer 2 — Trade setup"
+    }
+  ]
+}

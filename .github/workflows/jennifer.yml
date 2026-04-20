@@ -1,0 +1,49 @@
+name: Jennifer Trading System
+
+on:
+  schedule:
+    # Gira ogni 15 minuti durante ore di mercato (lun-ven, 9-22 UTC)
+    - cron: '0,15,30,45 9-22 * * 1-5'
+  workflow_dispatch:  # permette avvio manuale dal sito GitHub
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore cache dati
+        uses: actions/cache@v4
+        with:
+          path: data/
+          key: sarada-data-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            sarada-data-${{ runner.os }}-
+
+      - name: Esegui Layer 1 + Layer 2
+        env:
+          GITHUB_ACTIONS: "true"
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python "Sarada_Trading_System.py" --single-run
+
+      - name: Commit e push output dashboard
+        run: |
+          git config --local user.email "jennifer-bot@trading.com"
+          git config --local user.name "Jennifer Bot"
+          git add docs/ -f
+          git diff --staged --quiet || git commit -m "📊 Update dashboard $(date +'%d/%m/%Y %H:%M')"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

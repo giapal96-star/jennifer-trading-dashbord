@@ -1,0 +1,10 @@
+# Dati locali — non caricare su GitHub
+data/
+*.pkl
+*.xlsx
+__pycache__/
+*.pyc
+.env
+
+# Output locali (la cartella docs/ viene caricata dal bot)
+# Non ignorare docs/ — serve per GitHub Pages
