@@ -33,7 +33,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 INTERVAL_MINUTES        = int(os.environ.get("SARADA_INTERVAL_MINUTES", "15"))
 LOOKBACK_DAYS           = int(os.environ.get("SARADA_LOOKBACK_DAYS", "3000"))
-MACRO_REFRESH_DAYS      = 7
+MACRO_REFRESH_DAYS      = 0  # Ricalcola sempre ad ogni avvio
 
 DASHBOARD_FILE          = OUTPUT_DIR / "dashboard.html"
 EXCEL_FILE              = OUTPUT_DIR / "sarada_dati.xlsx"
@@ -1065,127 +1065,201 @@ def build_macro_context(prices):
     infl_level = infl_now if not pd.isna(infl_now) else np.nanmean([x for x in [cpi_yoy, core_cpi_yoy] if not pd.isna(x)]) if any(not pd.isna(x) for x in [cpi_yoy, core_cpi_yoy]) else is_
     infl_delta_use = inflation_delta if not pd.isna(inflation_delta) else inflation_momentum if not pd.isna(inflation_momentum) else 0.0
 
+    # ══════════════════════════════════════════════════════════════════════════
+    #  CLASSIFICAZIONE QUADRANTE — Logica a 2 assi (stile Quantaste)
+    #
+    #  ASSE INFLAZIONE: media mobile 3 mesi CPI + Core CPI
+    #    Soglia alta: > 3.0% → inflazione problematica
+    #    Soglia bassa: < 2.5% → inflazione sotto controllo
+    #
+    #  ASSE CRESCITA: media mobile 3 mesi di industrial + retail + occupazione
+    #    Soglia alta: > 2.0% → crescita solida
+    #    Soglia bassa: < 1.0% → crescita debole
+    #
+    #  I quadranti sono determinati dall'incrocio dei due assi.
+    #  Indicatori secondari (VIX, gold ratio, TIPS) aggiungono sfumature
+    #  ma NON possono ribaltare la decisione degli assi principali.
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # ── ASSE INFLAZIONE — media 3 mesi CPI + Core ────────────────────────────
+    # Più stabile del valore puntuale mensile
+    cpi_3m = trailing_mean(cpi_yoy_hist, 3) if not pd.isna(trailing_mean(cpi_yoy_hist, 3)) else cpi_yoy
+    core_3m = trailing_mean(core_cpi_yoy_hist, 3) if not pd.isna(trailing_mean(core_cpi_yoy_hist, 3)) else core_cpi_yoy
+    infl_axis = np.nanmean([x for x in [cpi_3m, core_3m] if not pd.isna(x)])
+
+    # Soglie inflazione
+    # Uso valore puntuale più recente con peso maggiore rispetto alla media
+    # Questo evita che mesi precedenti più bassi mascherino l'inflazione attuale
+    cpi_now    = cpi_yoy    if not pd.isna(cpi_yoy)    else cpi_3m
+    core_now   = core_cpi_yoy if not pd.isna(core_cpi_yoy) else core_3m
+    # Media pesata: 60% valore corrente, 40% media 3 mesi
+    infl_axis_w = np.nanmean([
+        x for x in [
+            cpi_now * 0.6 + (cpi_3m if not pd.isna(cpi_3m) else cpi_now) * 0.4,
+            core_now * 0.6 + (core_3m if not pd.isna(core_3m) else core_now) * 0.4,
+        ] if not pd.isna(x)
+    ])
+    infl_axis = infl_axis_w if not pd.isna(infl_axis_w) else infl_axis
+
+    INFL_HIGH = 2.8    # sopra = inflazione problematica (abbassata da 3.0)
+    INFL_LOW  = 2.2    # sotto = inflazione sotto controllo
+
+    infl_is_high = not pd.isna(infl_axis) and infl_axis >= INFL_HIGH
+    infl_is_low  = not pd.isna(infl_axis) and infl_axis < INFL_LOW
+    infl_is_mid  = not infl_is_high and not infl_is_low
+
+    # ── ASSE CRESCITA — media 3 mesi industrial + retail + disoccupazione ────
+    # Usa solo dati economici reali — NO SPX
+    # Stesso approccio: 60% valore corrente + 40% media 3 mesi
+    ind_3m_v   = trailing_mean(ind_yoy_hist, 3)
+    ret_3m_v   = trailing_mean(ret_yoy_hist, 3)
+    ind_w  = (ind_yoy * 0.6 + (ind_3m_v if not pd.isna(ind_3m_v) else ind_yoy) * 0.4) if not pd.isna(ind_yoy) else ind_3m_v
+    ret_w  = (ret_yoy * 0.6 + (ret_3m_v if not pd.isna(ret_3m_v) else ret_yoy) * 0.4) if not pd.isna(ret_yoy) else ret_3m_v
+
+    growth_components_raw = [x for x in [ind_w, ret_w] if not pd.isna(x)]
+    growth_axis = float(np.mean(growth_components_raw)) if growth_components_raw else np.nan
+
+    # Aggiusta per disoccupazione — penalità diretta se sopra 4%
+    if not pd.isna(unemployment):
+        unemp_penalty = max(0, (unemployment - 4.0) * 1.2)  # peso aumentato
+        if not pd.isna(growth_axis):
+            growth_axis -= unemp_penalty
+    # Delta disoccupazione: se sale rapidamente penalizza ulteriormente
+    if not pd.isna(unemp_delta) and unemp_delta > 0.1:
+        if not pd.isna(growth_axis):
+            growth_axis -= unemp_delta * 2.0
+
+    # Soglie crescita — calibrate sulla realtà USA 2026
+    # Con dati FRED ritardati di 1-2 mesi, usiamo soglie più realistiche
+    GROWTH_HIGH = 2.5   # sopra = crescita davvero forte
+    GROWTH_LOW  = 1.2   # sotto = crescita debole (ritardato = reale è peggio)
+
+    growth_is_high = not pd.isna(growth_axis) and growth_axis >= GROWTH_HIGH
+    growth_is_low  = not pd.isna(growth_axis) and growth_axis < GROWTH_LOW
+    growth_is_mid  = not growth_is_high and not growth_is_low
+
+    # ── CLASSIFICAZIONE BINARIA DEI QUADRANTI ────────────────────────────────
+    #
+    #   Inflazione ALTA  + Crescita BASSA  → STAGFLAZIONE
+    #   Inflazione ALTA  + Crescita ALTA   → SURRISCALDAMENTO
+    #   Inflazione BASSA + Crescita ALTA   → GOLDILOCKS / REFLAZIONE
+    #   Inflazione BASSA + Crescita BASSA  → RECESSIONE / DEFLAZIONE
+    #
+    # Zone grigie: usa indicatori secondari per decidere
+
     score_goldilocks = 0.0
     score_overheating = 0.0
     score_stagflation = 0.0
     score_deflation = 0.0
 
-    # ── LIVELLO INFLAZIONE ────────────────────────────────────────────────────
-    # Goldilocks: inflazione contenuta (sotto 3%)
-    score_goldilocks += norm(2.8 - infl_level, 1.2, -2.0, 2.2)
-    # Surriscaldamento: inflazione alta MA crescita ancora presente
-    score_overheating += norm(infl_level - 3.0, 1.0, -1.5, 2.0)
-    # Stagflazione: inflazione alta E persistente (soglia più bassa)
-    score_stagflation += norm(infl_level - 2.5, 0.8, -0.8, 3.0)
-    # Deflazione: inflazione bassa/negativa
-    score_deflation += norm(2.2 - infl_level, 1.0, -1.5, 2.5)
+    # PUNTEGGIO BASE — determinato dai 2 assi principali (peso 70%)
+    if infl_is_high and growth_is_low:
+        score_stagflation += 7.0
+        print(f"  [MACRO] Asse → STAGFLAZIONE (infl={infl_axis:.2f}% > {INFL_HIGH}, crescita={growth_axis:.2f}% < {GROWTH_LOW})")
+    elif infl_is_high and growth_is_high:
+        score_overheating += 7.0
+        print(f"  [MACRO] Asse → SURRISCALDAMENTO (infl={infl_axis:.2f}%, crescita={growth_axis:.2f}%)")
+    elif infl_is_low and growth_is_high:
+        score_goldilocks += 7.0
+        print(f"  [MACRO] Asse → GOLDILOCKS (infl={infl_axis:.2f}%, crescita={growth_axis:.2f}%)")
+    elif infl_is_low and growth_is_low:
+        score_deflation += 7.0
+        print(f"  [MACRO] Asse → RECESSIONE (infl={infl_axis:.2f}%, crescita={growth_axis:.2f}%)")
+    elif infl_is_high and growth_is_mid:
+        # Inflazione alta + crescita media → pendenza verso Stagflazione
+        score_stagflation += 4.5
+        score_overheating += 2.5
+        print(f"  [MACRO] Asse → STAGFLAZIONE/SURRISC (infl={infl_axis:.2f}%, crescita media={growth_axis:.2f}%)")
+    elif infl_is_mid and growth_is_low:
+        # Inflazione media + crescita bassa → pendenza verso Stagflazione
+        score_stagflation += 3.5
+        score_deflation += 2.0
+        print(f"  [MACRO] Asse → STAGFLAZIONE/RECESSO (infl media={infl_axis:.2f}%, crescita={growth_axis:.2f}%)")
+    elif infl_is_mid and growth_is_high:
+        # Inflazione media + crescita alta → Goldilocks con cautela
+        score_goldilocks += 3.5
+        score_overheating += 2.0
+        print(f"  [MACRO] Asse → GOLDILOCKS/SURRISC (infl media={infl_axis:.2f}%, crescita={growth_axis:.2f}%)")
+    elif infl_is_low and growth_is_mid:
+        # Inflazione bassa + crescita media → Goldilocks
+        score_goldilocks += 4.0
+        score_deflation += 1.5
+        print(f"  [MACRO] Asse → GOLDILOCKS (infl={infl_axis:.2f}%, crescita media={growth_axis:.2f}%)")
+    else:
+        # Zona grigia completa — usa indicatori secondari
+        score_goldilocks += 1.0
+        print(f"  [MACRO] Asse → zona grigia (infl={infl_axis:.2f}%, crescita={growth_axis:.2f}%)")
 
-    # ── DELTA INFLAZIONE ──────────────────────────────────────────────────────
-    # Goldilocks: inflazione in calo
-    score_goldilocks += norm(-infl_delta_use, 0.35, -1.5, 2.0)
-    # Surriscaldamento: inflazione in forte accelerazione
-    score_overheating += norm(infl_delta_use, 0.35, -1.0, 2.0)
-    # Stagflazione: inflazione stagnante o in lieve salita (anche delta neutro è ok)
-    score_stagflation += norm(infl_delta_use + 0.1, 0.30, -0.5, 2.2)
-    score_deflation += norm(-infl_delta_use, 0.30, -1.2, 1.8)
+    # ── ACCELERAZIONE / DECELERAZIONE — il cuore della metodologia Casario ──
+    # Non conta solo il livello, ma la direzione e la velocità del cambiamento.
+    # Un CPI al 5% in calo rapido è meno pericoloso di un CPI al 2.8% in salita.
 
-    # ── LIVELLO CRESCITA ──────────────────────────────────────────────────────
-    # Goldilocks e Surriscaldamento: crescita positiva
-    score_goldilocks += norm(growth_level, 1.0, -2.0, 2.0)
-    score_overheating += norm(growth_level, 0.8, -1.5, 2.2)
-    # Stagflazione: crescita debole o negativa (soglia chiave)
-    score_stagflation += norm(-growth_level + 0.2, 0.8, -1.0, 2.8)
-    score_deflation += norm(-growth_level, 0.8, -1.0, 2.8)
+    # Accelerazione inflazione: confronto media 3 mesi vs media 3 mesi precedenti
+    infl_3m_avg  = trailing_mean(infl_hist, 3)   # ultimi 3 mesi
+    infl_prev_3m = trailing_prev_mean(infl_hist, 3)  # 3 mesi prima
+    infl_accel = infl_3m_avg - infl_prev_3m if not pd.isna(infl_3m_avg) and not pd.isna(infl_prev_3m) else np.nan
 
-    # ── DELTA CRESCITA ────────────────────────────────────────────────────────
-    score_goldilocks += norm(growth_delta_use, 0.35, -1.5, 2.2)
-    score_overheating += norm(growth_delta_use, 0.30, -1.2, 2.0)
-    # Stagflazione: crescita in deterioramento anche se parte da livello ok
-    score_stagflation += norm(-growth_delta_use + 0.1, 0.28, -1.0, 2.4)
-    score_deflation += norm(-growth_delta_use, 0.25, -1.0, 2.5)
+    # Accelerazione crescita: confronto industrial+retail ultimi 3 mesi vs precedenti
+    ind_3m  = trailing_mean(ind_yoy_hist, 3); ind_prev = trailing_prev_mean(ind_yoy_hist, 3)
+    ret_3m  = trailing_mean(ret_yoy_hist, 3); ret_prev = trailing_prev_mean(ret_yoy_hist, 3)
+    growth_3m_avg  = np.nanmean([x for x in [ind_3m, ret_3m] if not pd.isna(x)]) if any(not pd.isna(x) for x in [ind_3m, ret_3m]) else np.nan
+    growth_prev_avg = np.nanmean([x for x in [ind_prev, ret_prev] if not pd.isna(x)]) if any(not pd.isna(x) for x in [ind_prev, ret_prev]) else np.nan
+    growth_accel = growth_3m_avg - growth_prev_avg if not pd.isna(growth_3m_avg) and not pd.isna(growth_prev_avg) else np.nan
 
-    # ── YIELD SPREAD ─────────────────────────────────────────────────────────
-    # Curva invertita o piatta → segnale recessivo/stagflazionistico
-    score_goldilocks += norm(yield_spread, 1.0, -1.0, 1.8)
-    score_overheating += norm(yield_spread, 0.8, -1.0, 1.4)
-    score_stagflation += norm(-yield_spread + 0.2, 0.6, -0.8, 2.0)
-    score_deflation += norm(-yield_spread, 0.5, -1.0, 2.2)
+    print(f"  [MACRO] Accelerazione infl: {infl_accel:+.3f} | Accelerazione crescita: {growth_accel:+.3f}")
 
-    # ── REAL YIELD ────────────────────────────────────────────────────────────
-    # Real yield molto alto → freno alla crescita (stagflazionistico)
-    score_goldilocks += norm(real_yield, 1.5, -1.0, 1.4)
-    score_overheating += norm(-real_yield + 0.5, 1.0, -1.0, 1.6)
-    # Real yield alto con inflazione alta → classico stagflazione
-    score_stagflation += norm(-real_yield + 2.0, 0.8, -0.8, 2.2)
-    score_deflation += norm(real_yield, 1.2, -1.0, 1.8)
+    # Inflazione in ACCELERAZIONE → peggiora Stagflazione/Surriscaldamento
+    if not pd.isna(infl_accel):
+        if infl_accel > 0.15:    # inflazione che accelera
+            score_stagflation += 0.8; score_overheating += 0.5
+            score_goldilocks  -= 0.6; score_deflation   -= 0.4
+            print(f"  [MACRO] Inflazione accelera (+{infl_accel:.2f}) → +stagflazione")
+        elif infl_accel < -0.15: # inflazione che decelera — segnale positivo
+            score_goldilocks  += 0.8; score_deflation   += 0.3
+            score_stagflation -= 0.6; score_overheating -= 0.4
+            print(f"  [MACRO] Inflazione decelera ({infl_accel:.2f}) → +goldilocks")
 
-    score_goldilocks += norm(real_yield_delta, 0.35, -1.0, 1.5)
-    score_overheating += norm(-real_yield_delta, 0.30, -1.0, 1.8)
-    score_stagflation += norm(-real_yield_delta, 0.22, -0.8, 1.8)
-    score_deflation += norm(real_yield_delta, 0.30, -1.0, 1.8)
+    # Crescita in ACCELERAZIONE → migliora Goldilocks/Surriscaldamento
+    if not pd.isna(growth_accel):
+        if growth_accel > 0.3:   # crescita che accelera
+            score_goldilocks  += 0.7; score_overheating += 0.4
+            score_stagflation -= 0.6; score_deflation   -= 0.5
+            print(f"  [MACRO] Crescita accelera (+{growth_accel:.2f}) → +goldilocks")
+        elif growth_accel < -0.3: # crescita che decelera — segnale negativo
+            score_stagflation += 0.8; score_deflation   += 0.5
+            score_goldilocks  -= 0.5; score_overheating -= 0.4
+            print(f"  [MACRO] Crescita decelera ({growth_accel:.2f}) → +stagflazione")
 
-    # ── GOLD/SP500 RATIO ─────────────────────────────────────────────────────
-    # Oro che outperforma fortemente l'azionario = segnale difensivo
-    score_goldilocks += norm(-gold_sp_ratio_3m, 5.0, -1.5, 1.6)
-    score_overheating += norm(-gold_sp_ratio_3m, 8.0, -0.8, 1.0)
-    # Oro che sovraperforma molto → stagflazione più che surriscaldamento
-    score_stagflation += norm(gold_sp_ratio_3m, 3.5, -0.8, 2.5)
-    score_deflation += norm(gold_sp_ratio_3m, 5.0, -0.8, 1.6)
+    # ── INDICATORI SECONDARI — sfumano ma non ribaltano ───────────────────────
+    # Yield spread: curva invertita = segnale recessivo
+    if not pd.isna(yield_spread):
+        if yield_spread < 0:
+            score_stagflation += 0.6; score_deflation += 0.5
+            score_goldilocks -= 0.4; score_overheating -= 0.4
+        elif yield_spread > 1.0:
+            score_goldilocks += 0.5; score_overheating += 0.3
 
-    # ── TIPS ─────────────────────────────────────────────────────────────────
-    # TIPS in salita = mercato si protegge dall'inflazione
-    score_goldilocks += norm(-tips_3m, 4.0, -1.0, 1.0)
-    score_overheating += norm(tips_3m, 4.0, -0.8, 1.4)
-    # TIPS + inflazione alta → stagflazione
-    score_stagflation += norm(tips_3m, 3.0, -0.8, 2.2)
-    score_deflation += norm(-tips_3m, 4.5, -1.0, 1.4)
+    # Real yield: alto = freno alla crescita
+    if not pd.isna(real_yield):
+        if real_yield > 2.0:
+            score_stagflation += 0.5; score_deflation += 0.3; score_goldilocks -= 0.3
+        elif real_yield < 0:
+            score_goldilocks += 0.4; score_overheating += 0.4
 
-    # ── STRESS / LIQUIDITA ────────────────────────────────────────────────────
-    score_goldilocks += norm(-ss, 1.0, -1.2, 1.8)
-    score_overheating += norm(-ss, 1.4, -1.0, 1.0)
-    score_stagflation += norm(ss, 1.0, -0.8, 2.2)
-    score_deflation += norm(ss, 0.9, -1.0, 2.4)
+    # Gold/SP500 ratio: oro che outperforma = difensivo/inflazionistico
+    if not pd.isna(gold_sp_ratio_3m):
+        if gold_sp_ratio_3m > 10:
+            score_stagflation += 0.8; score_deflation += 0.4; score_goldilocks -= 0.6
+        elif gold_sp_ratio_3m > 5:
+            score_stagflation += 0.4
 
-    score_goldilocks += norm(-ls, 1.2, -1.0, 1.0)
-    score_overheating += norm(-ls, 1.5, -1.0, 0.8)
-    score_stagflation += norm(ls, 0.9, -0.8, 1.4)
-    score_deflation += norm(ls, 0.8, -1.0, 1.8)
+    # TIPS: protezione inflazione richiesta dal mercato
+    if not pd.isna(tips_3m) and tips_3m > 3:
+        score_stagflation += 0.4; score_overheating += 0.2
 
-    # ── SPX MOMENTUM ─────────────────────────────────────────────────────────
-    # Attenzione: in stagflazione il mercato può rimbalzare. Non usare SPX
-    # positivo come prova contro la stagflazione — usarlo solo con moderazione.
-    if not pd.isna(spx_3m):
-        score_goldilocks += norm(spx_3m, 10.0, -1.0, 1.5)
-        score_overheating += norm(spx_3m, 16.0, -0.8, 1.0)  # peso ridotto
-        score_deflation += norm(-spx_3m, 8.0, -1.0, 1.8)
-        # SPX positivo NON è prova contro stagflazione — lo escludiamo
-    if not pd.isna(hy_lqd_mom):
-        score_goldilocks += norm(hy_lqd_mom, 2.0, -1.0, 1.0)
-        score_deflation += norm(-hy_lqd_mom, 2.0, -1.0, 1.4)
-        score_stagflation += norm(-hy_lqd_mom, 2.5, -0.8, 1.2)
-
-    # ── SEGNALE AGGIUNTIVO: DISOCCUPAZIONE IN SALITA = STAGFLAZIONE/DEFLAZIONE
-    if not pd.isna(unemployment):
-        unemp_vs_norm = unemployment - 4.0  # sopra 4% = pressione negativa
-        if unemp_vs_norm > 0.5:
-            score_stagflation += norm(unemp_vs_norm, 1.0, 0, 1.5)
-            score_deflation   += norm(unemp_vs_norm, 1.2, 0, 1.2)
-            score_goldilocks  -= norm(unemp_vs_norm, 1.5, 0, 1.0)
-            score_overheating -= norm(unemp_vs_norm, 2.0, 0, 1.0)
-
-    # ── DELTA DISOCCUPAZIONE — segnale direzionale chiave ────────────────────
-    # Disoccupazione che SALE = crescita in deterioramento = Stagflazione/Deflazione
-    # Disoccupazione che SCENDE = economia forte = Surriscaldamento/Goldilocks
-    if not pd.isna(unemp_delta):
-        if unemp_delta > 0.1:   # sale → pessimo per crescita
-            score_stagflation += norm(unemp_delta, 0.15, 0, 2.5)
-            score_deflation   += norm(unemp_delta, 0.20, 0, 1.5)
-            score_overheating -= norm(unemp_delta, 0.20, 0, 2.0)
-            score_goldilocks  -= norm(unemp_delta, 0.25, 0, 1.5)
-        elif unemp_delta < -0.1:  # scende → positivo per crescita
-            score_overheating += norm(abs(unemp_delta), 0.20, 0, 1.5)
-            score_goldilocks  += norm(abs(unemp_delta), 0.25, 0, 1.0)
-            score_stagflation -= norm(abs(unemp_delta), 0.25, 0, 1.5)
+    # Stress/liquidità
+    if not pd.isna(ss) and ss > 1.5:
+        score_stagflation += 0.3; score_deflation += 0.3; score_goldilocks -= 0.3
 
     quadrant_scores = {
         "Goldilocks / Reflazione": round(score_goldilocks, 2),
